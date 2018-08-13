@@ -1,14 +1,16 @@
 local BasePlugin = require "kong.plugins.base_plugin"
-local CacheHandler = BasePlugin:extend()
-local responses = require "kong.tools.responses"
-local req_get_method = ngx.req.get_method
+local ResponseCacheHandler = BasePlugin:extend()
 
 local redis = require "resty.redis"
-local header_filter = require "kong.plugins.response-transformer.header_transformer"
-local is_json_body = header_filter.is_json_body
-
 local cjson_decode = require("cjson").decode
 local cjson_encode = require("cjson").encode
+local responses = require "kong.tools.responses"
+local header_filter = require "kong.plugins.response-transformer.header_transformer"
+
+local is_json_body = header_filter.is_json_body
+local ngx_log = ngx.log
+local req_get_method  = ngx.req.get_method
+local table_concat = table.concat
 
 local function cacheable_request(method, uri, conf)
   if method ~= "GET" then
@@ -111,13 +113,32 @@ local function red_set(premature, key, val, conf)
   end
 end
 
-function CacheHandler:new()
-  CacheHandler.super.new(self, "response-cache")
+
+
+
+
+
+
+function ResponseCacheHandler:new()
+  ResponseCacheHandler.super.new(self, "response-cache")
 end
 
-function CacheHandler:access(conf)
-  CacheHandler.super.access(self)
-  
+function ResponseCacheHandler:init_worker()
+  ResponseCacheHandler.super.init_worker(self)
+end
+
+function ResponseCacheHandler:certificate(conf)
+  ResponseCacheHandler.super.certificate(self)
+end
+
+function ResponseCacheHandler:rewrite(conf)
+  ResponseCacheHandler.super.rewrite(self)
+end
+
+function ResponseCacheHandler:access(conf)
+  ResponseCacheHandler.super.access(self)
+
+  ngx.header['X-Test'] = '1337'
   local uri = ngx.var.uri
   if not cacheable_request(req_get_method(), uri, conf) then
     ngx.log(ngx.NOTICE, "not cacheable")
@@ -133,12 +154,9 @@ function CacheHandler:access(conf)
 
   local cached_val, err = red:get(cache_key)
   if cached_val and cached_val ~= ngx.null then
+    cached_val = json_decode(cached_val)
     ngx.log(ngx.NOTICE, "cache hit")
-    local val = json_decode(cached_val)
-    for k,v in pairs(val.headers) do
-      ngx.req.set_header(k, v)
-    end
-    return responses.send_HTTP_OK(val.content)
+    return responses.send(200, cached_val)
   end
 
   ngx.log(ngx.NOTICE, "cache miss")
@@ -147,8 +165,8 @@ function CacheHandler:access(conf)
   }
 end
 
-function CacheHandler:header_filter(conf)
-  CacheHandler.super.header_filter(self)
+function ResponseCacheHandler:header_filter(conf)
+  ResponseCacheHandler.super.header_filter(self)
 
   local ctx = ngx.ctx.response_cache
   if not ctx then
@@ -158,26 +176,56 @@ function CacheHandler:header_filter(conf)
   ctx.headers = ngx.resp.get_headers()
 end
 
-function CacheHandler:body_filter(conf)
-  CacheHandler.super.body_filter(self)
+function ResponseCacheHandler:body_filter(conf)
+  ResponseCacheHandler.super.body_filter(self)
 
   local ctx = ngx.ctx.response_cache
   if not ctx then
     return
   end
 
-  local chunk = ngx.arg[1]
-  local eof = ngx.arg[2]
-  
-  local res_body = ctx and ctx.res_body or ""
-  res_body = res_body .. (chunk or "")
-  ctx.res_body = res_body
-  if eof then
-    local content = json_decode(ctx.res_body)
-    local value = { content = content, headers = ctx.headers }
-    local value_json = json_encode(value)
-    ngx.timer.at(0, red_set, ctx.cache_key, value_json, conf)
+  local uri = ngx.var.uri
+  local cache_key = get_cache_key(uri, ngx.req.get_headers(), ngx.req.get_uri_args(), conf)  
+  ngx.log(ngx.NOTICE, "cache_key" .. cache_key)
+
+  if is_json_body(ngx.header["content-type"]) then
+    local ctx = ngx.ctx
+    local chunk, eof = ngx.arg[1], ngx.arg[2]
+
+    ctx.rt_body_chunks = ctx.rt_body_chunks or {}
+    ctx.rt_body_chunk_number = ctx.rt_body_chunk_number or 1
+
+    if eof then
+      local body = table_concat(ctx.rt_body_chunks)
+      ngx.timer.at(0, red_set, cache_key, body, conf)
+      ngx.log(ngx.NOTICE, "cache set (" .. cache_key .. "): " .. body)
+      ngx.arg[1] = body
+    else
+      ctx.rt_body_chunks[ctx.rt_body_chunk_number] = chunk
+      ctx.rt_body_chunk_number = ctx.rt_body_chunk_number + 1
+      ngx.arg[1] = nil
+    end
   end
+
+  
+
+  -- local chunk = ngx.arg[1]
+  -- local eof = ngx.arg[2]
+  
+  -- local res_body = ctx and ctx.res_body or ""
+  -- res_body = res_body .. (chunk or "")
+  -- ctx.res_body = res_body
+  -- if eof then
+  --   local content = json_decode(ctx.res_body)
+  --   local value = { content = content, headers = ctx.headers }
+  --   local value_json = json_encode(value)
+  --   ngx.log(ngx.NOTICE, "cache set"+ctx.res_body)
+  --   ngx.timer.at(0, red_set, ctx.cache_key, value_json, conf)
+  -- end
 end
 
-return CacheHandler
+function ResponseCacheHandler:log(conf)
+  ResponseCacheHandler.super.log(self)
+end
+
+return ResponseCacheHandler

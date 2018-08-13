@@ -1,7 +1,7 @@
 return {
   no_consumer = true,
   fields = {
-    cache_policy = { 
+  	cache_policy = { 
       type = "table",
       schema = {
         fields = {
@@ -16,5 +16,5 @@ return {
     redis_port = { type = "number", default = 6379 },
     redis_password = { type = "string" },
     redis_timeout = { type = "number", default = 2000 }
-  }
+  },
 }
